@@ -6,6 +6,8 @@ At the moment, this README is mostly distilled from a couple of emails I wrote o
 
 ## Build instructions
 
+You need to have a gcc build environment installed. Additionally, make sure that GNU make, bison and flex are installed. 
+
 	cd mDNSPosix
 	make os=linux
 	make install
@@ -25,6 +27,8 @@ To register on a wide-area bonjour server, you'll also need a config file /etc/m
 
 "secret-name" is optional: I added it because Apple's implementation automatically uses the domain name as the key name, while my DDNS server uses something different.
 
+*NOTE: Ensure that there are NO extraneous whitespaces at the ends of the lines in /etc/mdnsd.conf -- If there are, it will not work.* 
+
 You can also create a file /etc/mdnsd-services.conf, which can contain services that you want mdnsd to register when it is running. The format is exactly similar to the Services.txt file in mDNSPosix/ from Apple's tarball, since I basically just copied their code from mDNSResponder.c over to PosixDaemon.c. However, if you want to have a service registered both on the local and the wide-area domain, you'll need to include it twice, e.g. like
 
 	my-ssh-service-name
@@ -36,6 +40,8 @@ You can also create a file /etc/mdnsd-services.conf, which can contain services 
 	22
 
 NAT/PMP port forwarding will also work, if your router supports it (Apple-branded ones as well as some 3rd-party ones with custom firmware do).
+
+*NOTE: Ensure that there are NO extraneous whitespaces at the ends of the lines in /etc/mdnsd-services.conf -- If there are, it will not work.* 
 
 ## Using dnsextd
 
