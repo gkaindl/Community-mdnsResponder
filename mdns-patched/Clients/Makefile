@@ -33,6 +33,13 @@ TARGETS = build/dns-sd
 LIBS = -L../mDNSPosix/build/prod/ -ldns_sd
 endif
 
+# At least on Debian armel/armhf and Ubuntu armel/armhf, we get a linker error
+# regarding the uidiv EABI function if we don't link against gcc_s. 
+PARCH := $(shell uname -p)
+ifeq (arm,$(findstring arm,$(PARCH)))
+LIBS += -lgcc_s
+endif
+
 all: $(TARGETS)
 
 clean:
