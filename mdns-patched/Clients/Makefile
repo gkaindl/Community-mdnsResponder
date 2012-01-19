@@ -35,7 +35,7 @@ endif
 
 # At least on Debian armel/armhf and Ubuntu armel/armhf, we get a linker error
 # regarding the uidiv EABI function if we don't link against gcc_s. 
-PARCH := $(shell uname -p)
+PARCH := $(shell uname -m)
 ifeq (arm,$(findstring arm,$(PARCH)))
 LIBS += -lgcc_s
 endif
