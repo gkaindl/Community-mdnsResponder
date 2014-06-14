@@ -34,10 +34,10 @@ LIBS = -L../mDNSPosix/build/prod/ -ldns_sd
 endif
 
 # At least on Debian armel/armhf and Ubuntu armel/armhf, we get a linker error
-# regarding the uidiv EABI function if we don't link against gcc_s. 
+# regarding the uidiv EABI function if we don't link against libgcc_s and libasan.. 
 PARCH := $(shell uname -m)
 ifeq (arm,$(findstring arm,$(PARCH)))
-LIBS += -lgcc_s
+LIBS += -lasan -lgcc_s
 endif
 
 all: $(TARGETS)
