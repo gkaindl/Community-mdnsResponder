@@ -1125,7 +1125,7 @@ mDNSlocal int SetupSocket(struct sockaddr *intfAddr, mDNSIPPort port, int interf
 		#else
 			#error This platform has no way to avoid address busy errors on multicast.
 		#endif
-		if (err < 0) { err = errno; perror("setsockopt - SO_REUSExxxx"); }
+		if (err < 0) { err = errno; perror("setsockopt - SO_REUSExxxx"); err = 0; }
 		}
 
 	// We want to receive destination addresses and interface identifiers.
