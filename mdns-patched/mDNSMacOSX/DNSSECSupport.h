@@ -1,13 +1,13 @@
 /* -*- Mode: C; tab-width: 4 -*-
  *
- * Copyright (c) 2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2012 Apple Computer, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-#ifndef __SAFE_VPROC_H
-#define __SAFE_VPROC_H
+#ifndef __DNSSEC_SUPPORT_H
+#define __DNSSEC_SUPPORT_H
 
-extern void safe_vproc_transaction_begin(void);
-extern void safe_vproc_transaction_end(void);
+extern mStatus DNSSECPlatformInit(mDNS *const m);
+extern void UpdateTrustAnchors(mDNS *const m);
 
-#endif /* __SAFE_VPROC_H */
+#endif // __DNSSEC_SUPPORT_H

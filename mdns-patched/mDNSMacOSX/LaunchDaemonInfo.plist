@@ -6,6 +6,8 @@
 	<string>com.apple.mDNSResponder</string>
 	<key>OnDemand</key>
 	<false/>
+	<key>InitGroups</key>
+	<false/>
 	<key>UserName</key>
 	<string>_mdnsresponder</string>
 	<key>GroupName</key>
@@ -13,12 +15,13 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/sbin/mDNSResponder</string>
-		<string>-launchd</string>
 	</array>
 	<key>MachServices</key>
 	<dict>
 		<key>com.apple.mDNSResponder</key>
 		<true/>
+               <key>com.apple.mDNSResponder.dnsproxy</key>
+               <true/>
 	</dict>
 	<key>Sockets</key>
 	<dict>
@@ -34,5 +37,9 @@
 	</dict>
 	<key>EnableTransactions</key>
 	<true/>
+	<key>BeginTransactionAtShutdown</key>
+	<true/>
+	<key>POSIXSpawnType</key>
+	<string>Interactive</string>
 </dict>
 </plist>
