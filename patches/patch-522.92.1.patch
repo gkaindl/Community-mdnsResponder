@@ -1,7 +1,443 @@
+diff -rupN mDNSResponder-522.92.1/mDNSPosix/Identify.c mDNSResponder-522.92.1-Linux/mDNSPosix/Identify.c
+--- mDNSResponder-522.92.1/mDNSPosix/Identify.c	2013-02-13 19:00:18.000000000 -0800
++++ mDNSResponder-522.92.1-Linux/mDNSPosix/Identify.c	2014-08-17 13:21:32.000000000 -0700
+@@ -22,8 +22,10 @@
+ // We want to use the functionality provided by "mDNS.c",
+ // except we'll sneak a peek at the packets before forwarding them to the normal mDNSCoreReceive() routine
+ #define mDNSCoreReceive __MDNS__mDNSCoreReceive
++#define UDPSocket_struct __UDPSocket_struct
+ #include "mDNS.c"
+ #undef mDNSCoreReceive
++#undef UDPSocket_struct
+ 
+ //*************************************************************************************************************
+ // Headers
+diff -rupN mDNSResponder-522.92.1/mDNSPosix/NetMonitor.c mDNSResponder-522.92.1-Linux/mDNSPosix/NetMonitor.c
+--- mDNSResponder-522.92.1/mDNSPosix/NetMonitor.c	2012-11-15 14:56:09.000000000 -0800
++++ mDNSResponder-522.92.1-Linux/mDNSPosix/NetMonitor.c	2014-08-17 13:21:32.000000000 -0700
+@@ -22,8 +22,10 @@
+ // We want to use much of the functionality provided by "mDNS.c",
+ // except we'll steal the packets that would be sent to normal mDNSCoreReceive() routine
+ #define mDNSCoreReceive __NOT__mDNSCoreReceive__NOT__
++#define UDPSocket_struct __UDPSocket_struct
+ #include "mDNS.c"
+ #undef mDNSCoreReceive
++#undef UDPSocket_struct
+ 
+ //*************************************************************************************************************
+ // Headers
+diff -rupN mDNSResponder-522.92.1/mDNSPosix/PosixDaemon.c mDNSResponder-522.92.1-Linux/mDNSPosix/PosixDaemon.c
+--- mDNSResponder-522.92.1/mDNSPosix/PosixDaemon.c	2011-12-01 16:39:45.000000000 -0800
++++ mDNSResponder-522.92.1-Linux/mDNSPosix/PosixDaemon.c	2014-08-17 13:21:32.000000000 -0700
+@@ -50,6 +50,12 @@ extern int daemon(int, int);
+ #include "PlatformCommon.h"
+ 
+ #define CONFIG_FILE "/etc/mdnsd.conf"
++
++// service registration
++#define SERVICES_FILE "/etc/mdnsd-services.conf"
++static mStatus RegisterServicesInFile(const char *filePath);
++static void DeregisterOurServices(void);
++
+ static domainname DynDNSZone;                // Default wide-area zone for service registration
+ static domainname DynDNSHostname;
+ 
+@@ -88,13 +94,18 @@ static void Reconfigure(mDNS *m)
+ {
+     mDNSAddr DynDNSIP;
+     const mDNSAddr dummy = { mDNSAddrType_IPv4, { { { 1, 1, 1, 1 } } } };;
++    mDNSAddr router;
+     mDNS_SetPrimaryInterfaceInfo(m, NULL, NULL, NULL);
+     if (ParseDNSServers(m, uDNS_SERVERS_FILE) < 0)
+         LogMsg("Unable to parse DNS server list. Unicast DNS-SD unavailable");
+     ReadDDNSSettingsFromConfFile(m, CONFIG_FILE, &DynDNSHostname, &DynDNSZone, NULL);
+     mDNSPlatformSourceAddrForDest(&DynDNSIP, &dummy);
+     if (DynDNSHostname.c[0]) mDNS_AddDynDNSHostName(m, &DynDNSHostname, NULL, NULL);
+-    if (DynDNSIP.type) mDNS_SetPrimaryInterfaceInfo(m, &DynDNSIP, NULL, NULL);
++    if (DynDNSIP.type) {
++        int r = mDNS_PlatformGetGateway(NULL, &router, NULL);
++        mDNS_SetPrimaryInterfaceInfo(m, &DynDNSIP, NULL, (mStatus_NoError == r) ? &router : NULL);
++    }
++
+     mDNS_ConfigChanged(m);
+ }
+ 
+@@ -194,9 +205,14 @@ int main(int argc, char **argv)
+             LogMsg("WARNING: mdnsd continuing as root because user \"nobody\" does not exist");
+     }
+ 
++    if(mStatus_NoError != RegisterServicesInFile(SERVICES_FILE))
++        LogMsg("Failed to register (some) services from %s.", SERVICES_FILE);
++
+     if (mStatus_NoError == err)
+         err = MainLoop(&mDNSStorage);
+ 
++    DeregisterOurServices();
++
+     LogMsg("%s stopping", mDNSResponderVersionString);
+ 
+     mDNS_Close(&mDNSStorage);
+@@ -242,6 +258,325 @@ mDNSexport void RecordUpdatedNiceLabel(m
+     // No-op, for now
+ }
+ 
++// registering services from config file
++
++#include <assert.h>
++
++typedef struct PosixService PosixService;
++
++struct PosixService {
++    ServiceRecordSet coreServ;
++    PosixService *next;
++    int serviceID;
++};
++
++static PosixService *gServiceList = NULL;
++
++static void RegistrationCallback(mDNS *const m, ServiceRecordSet *const thisRegistration, mStatus status)
++    // mDNS core calls this routine to tell us about the status of 
++    // our registration.  The appropriate action to take depends 
++    // entirely on the value of status.
++{
++    switch (status) {
++
++        case mStatus_NoError:      
++            debugf("Callback: %##s Name Registered",   thisRegistration->RR_SRV.resrec.name->c); 
++            // Do nothing; our name was successfully registered.  We may 
++            // get more call backs in the future.
++            break;
++
++        case mStatus_NameConflict: 
++            debugf("Callback: %##s Name Conflict",     thisRegistration->RR_SRV.resrec.name->c); 
++
++            // In the event of a conflict, this sample RegistrationCallback 
++            // just calls mDNS_RenameAndReregisterService to automatically 
++            // pick a new unique name for the service. For a device such as a 
++            // printer, this may be appropriate.  For a device with a user 
++            // interface, and a screen, and a keyboard, the appropriate response 
++            // may be to prompt the user and ask them to choose a new name for 
++            // the service.
++            //
++            // Also, what do we do if mDNS_RenameAndReregisterService returns an 
++            // error.  Right now I have no place to send that error to.
++
++            status = mDNS_RenameAndReregisterService(m, thisRegistration, mDNSNULL);
++            assert(status == mStatus_NoError);
++            break;
++
++        case mStatus_MemFree:      
++            debugf("Callback: %##s Memory Free",       thisRegistration->RR_SRV.resrec.name->c); 
++
++            // When debugging is enabled, make sure that thisRegistration 
++            // is not on our gServiceList.
++
++            #if !defined(NDEBUG)
++                {
++                    PosixService *cursor;
++
++                    cursor = gServiceList;
++                    while (cursor != NULL) {
++                        assert(&cursor->coreServ != thisRegistration);
++                        cursor = cursor->next;
++                    }
++                }
++            #endif
++            free(thisRegistration);
++            break;
++
++        default:                   
++            debugf("Callback: %##s Unknown Status %ld", thisRegistration->RR_SRV.resrec.name->c, status); 
++            break;
++    }
++}
++
++static int gServiceID = 0;
++
++static mDNSBool CheckThatRichTextNameIsUsable(const char *richTextName, mDNSBool printExplanation)
++    // Checks that richTextName is reasonable 
++    // label and, if it isn't and printExplanation is true, prints 
++    // an explanation of why not.
++{    
++    mDNSBool result = mDNStrue;
++    if (result && strlen(richTextName) > 63) {
++        if (printExplanation) {
++            LogMsg("%s: Service name is too long (must be 63 characters or less)\n", 
++                    SERVICES_FILE);
++        }
++        result = mDNSfalse;
++    }
++    if (result && richTextName[0] == 0) {
++        if (printExplanation) {
++            LogMsg("%s: Service name can't be empty\n", SERVICES_FILE);
++        }
++        result = mDNSfalse;
++    }
++    return result;
++}
++
++static mDNSBool CheckThatServiceTypeIsUsable(const char *serviceType, mDNSBool printExplanation)
++    // Checks that serviceType is a reasonable service type 
++    // label and, if it isn't and printExplanation is true, prints 
++    // an explanation of why not.
++{
++    mDNSBool result;
++
++    result = mDNStrue;
++    if (result && strlen(serviceType) > 63) {
++        if (printExplanation) {
++            LogMsg("%s: Service type is too long (must be 63 characters or less)\n", 
++                    SERVICES_FILE);
++        }
++        result = mDNSfalse;
++    }
++    if (result && serviceType[0] == 0) {
++        if (printExplanation) {
++            LogMsg("%s: Service type can't be empty\n", 
++                    SERVICES_FILE);
++        }
++        result = mDNSfalse;
++    }
++    return result;
++}
++
++static mDNSBool CheckThatPortNumberIsUsable(long portNumber, mDNSBool printExplanation)
++    // Checks that portNumber is a reasonable port number
++    // and, if it isn't and printExplanation is true, prints 
++    // an explanation of why not.
++{
++    mDNSBool result;
++
++    result = mDNStrue;
++    if (result && (portNumber <= 0 || portNumber > 65535)) {
++        if (printExplanation) {
++               LogMsg("%s: Port number must be in range 1..65535\n", 
++                    SERVICES_FILE);
++        }
++        result = mDNSfalse;
++    }
++    return result;
++}
++
++static mDNSBool ReadALine(char *buf, size_t bufSize, FILE *fp)
++// Read a line, skipping over any blank lines or lines starting with '#'
++{
++    mDNSBool good, skip;
++    do {
++        good = (fgets(buf, bufSize, fp) != NULL);
++        skip = (good && (buf[0] == '#'));
++    } while (good && skip);
++    if (good)
++    {
++        int     len = strlen( buf);
++        if ( buf[len - 1] == '\r' || buf[len - 1] == '\n')
++            buf[len - 1] = '\0';
++    }
++    return good;
++}
++
++static mStatus RegisterOneService(const char *  richTextName, 
++                                  const char *  serviceType, 
++                                  const char *  serviceDomain, 
++                                  const mDNSu8  text[],
++                                  mDNSu16       textLen,
++                                  long          portNumber)
++{
++    mStatus             status;
++    PosixService *      thisServ;
++    domainlabel         name;
++    domainname          type;
++    domainname          domain;
++    
++    status = mStatus_NoError;
++    thisServ = (PosixService *) malloc(sizeof(*thisServ));
++    if (thisServ == NULL) {
++        status = mStatus_NoMemoryErr;
++    }
++    if (status == mStatus_NoError) {
++        MakeDomainLabelFromLiteralString(&name,  richTextName);
++        MakeDomainNameFromDNSNameString(&type, serviceType);
++        MakeDomainNameFromDNSNameString(&domain, serviceDomain);
++        status = mDNS_RegisterService(&mDNSStorage, &thisServ->coreServ,
++                &name, &type, &domain,              // Name, type, domain
++                NULL, mDNSOpaque16fromIntVal(portNumber),
++                text, textLen,                      // TXT data, length
++                NULL, 0,                            // Subtypes
++                mDNSInterface_Any,                  // Interface ID
++                RegistrationCallback, thisServ, // Callback and context
++                0);                       //  flags
++    }
++    if (status == mStatus_NoError) {
++        thisServ->serviceID = gServiceID;
++        gServiceID += 1;
++
++        thisServ->next = gServiceList;
++        gServiceList = thisServ;
++
++        if (gMDNSPlatformPosixVerboseLevel > 0) {
++            LogMsg("%s: Registered service %d, name '%s', type '%s', port %ld\n", 
++                    SERVICES_FILE, 
++                    thisServ->serviceID, 
++                    richTextName,
++                    serviceType,
++                    portNumber);
++        }
++    } else {
++        if (thisServ != NULL) {
++            free(thisServ);
++        }
++    }
++    return status;
++}
++
++static const char kDefaultServiceDomain[] = "local.";
++
++static mStatus RegisterServicesInFile(const char *filePath)
++{
++    mStatus     status = mStatus_NoError;
++    FILE *      fp = fopen(filePath, "r");
++    int         junk;
++
++    if (fp == NULL) {
++        status = mStatus_UnknownErr;
++    }
++    if (status == mStatus_NoError) {
++        mDNSBool good = mDNStrue;
++        do {
++            int         ch;
++            char name[256];
++            char type[256];
++            const char *dom = kDefaultServiceDomain;
++            char rawText[1024];
++            mDNSu8  text[sizeof(RDataBody)];
++            unsigned int textLen = 0;
++            char port[256];
++
++            // Skip over any blank lines.
++            do ch = fgetc(fp); while ( ch == '\n' || ch == '\r' );
++            if (ch != EOF) good = (ungetc(ch, fp) == ch);
++
++            // Read three lines, check them for validity, and register the service.
++            good = ReadALine(name, sizeof(name), fp);               
++            if (good) {
++                good = ReadALine(type, sizeof(type), fp);
++            }
++            if (good) {
++                char *p = type;
++                while (*p && *p != ' ') p++;
++                if (*p) {
++                    *p = 0;
++                    dom = p+1;
++                }
++            }
++            if (good) {
++                good = ReadALine(port, sizeof(port), fp);
++            }
++            if (good) {
++                good =     CheckThatRichTextNameIsUsable(name, mDNSfalse)
++                        && CheckThatServiceTypeIsUsable(type, mDNSfalse)
++                        && CheckThatPortNumberIsUsable(atol(port), mDNSfalse);
++            }
++            if (good) {
++                while (1) {
++                    int len;
++                    if (!ReadALine(rawText, sizeof(rawText), fp)) break;
++                    len = strlen(rawText);
++                    if (len <= 255)
++                        {
++                        unsigned int newlen = textLen + 1 + len;
++                        if (len == 0 || newlen >= sizeof(text)) break;
++                        text[textLen] = len;
++                        mDNSPlatformMemCopy(text + textLen + 1, rawText, len);
++                        textLen = newlen;
++                        }
++                    else
++                        LogMsg("%s: TXT attribute too long for name = %s, type = %s, port = %s\n", 
++                            SERVICES_FILE, name, type, port);
++                }
++            }
++            if (good) {
++                status = RegisterOneService(name, type, dom, text, textLen, atol(port));
++                if (status != mStatus_NoError) {
++                    LogMsg("%s: Failed to register service, name = %s, type = %s, port = %s\n", 
++                            SERVICES_FILE, name, type, port);
++                    status = mStatus_NoError;       // keep reading
++                }
++            }
++        } while (good && !feof(fp));
++
++        if ( ! good ) {
++            LogMsg("%s: Error reading service file %s\n", SERVICES_FILE, filePath);
++        }
++    }
++
++    if (fp != NULL) {
++        junk = fclose(fp);
++        assert(junk == 0);
++    }
++
++    return status;
++}
++
++static void DeregisterOurServices(void)
++{
++    PosixService *thisServ;
++    int thisServID;
++    
++    while (gServiceList != NULL) {
++        thisServ = gServiceList;
++        gServiceList = thisServ->next;
++
++        thisServID = thisServ->serviceID;
++        
++        mDNS_DeregisterService(&mDNSStorage, &thisServ->coreServ);
++
++        if (gMDNSPlatformPosixVerboseLevel > 0) {
++            LogMsg("%s: Deregistered service %d\n",
++                    SERVICES_FILE, 
++                    thisServ->serviceID);
++        }
++    }
++}
++
+ #if _BUILDING_XCODE_PROJECT_
+ // If the process crashes, then this string will be magically included in the automatically-generated crash log
+ const char *__crashreporter_info__ = mDNSResponderVersionString_SCCS + 5;
 diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-Linux/mDNSPosix/mDNSPosix.c
 --- mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c	2013-04-25 16:22:21.000000000 -0700
-+++ mDNSResponder-522.92.1-Linux/mDNSPosix/mDNSPosix.c	2014-08-17 11:36:29.000000000 -0700
-@@ -144,7 +144,7 @@ mDNSexport mStatus mDNSPlatformSendUDP(c
++++ mDNSResponder-522.92.1-Linux/mDNSPosix/mDNSPosix.c	2014-08-17 13:21:32.000000000 -0700
+@@ -50,6 +50,10 @@
+ #include <net/if.h>
+ #endif // USES_NETLINK
+ 
++#ifdef TARGET_OS_LINUX
++#include <sys/ioctl.h>
++#endif
++
+ #include "mDNSUNP.h"
+ #include "GenLinkedList.h"
+ 
+@@ -66,6 +70,19 @@ struct PosixEventSource
+ };
+ typedef struct PosixEventSource PosixEventSource;
+ 
++// Platform-dependent low-level networking stuff
++
++mDNSlocal int SetupSocket(struct sockaddr *intfAddr, mDNSIPPort port, int interfaceIndex, int *sktPtr,
++               mDNSIPPort* outport, mDNSBool joinMC);
++mDNSlocal mStatus SetupTCPSocket(TCPSocket *sock, u_short sa_family, mDNSIPPort *port);
++
++mDNSlocal int GetFDTcp(TCPSocket *sock, u_short sa_family);
++
++static struct UDPSocket_struct* PlatformUDPSockets = NULL;
++static struct TCPSocket_struct* PlatformTCPSockets = NULL;
++
++mDNSlocal void DoTcpSocketCallback(TCPSocket *sock);
++
+ // Context record for interface change callback
+ struct IfChangeRec
+ {
+@@ -144,7 +161,7 @@ mDNSexport mStatus mDNSPlatformSendUDP(c
      PosixNetworkInterface * thisIntf = (PosixNetworkInterface *)(InterfaceID);
      int sendingsocket = -1;
  
@@ -10,7 +446,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
      (void) useBackgroundTrafficClass;
  
      assert(m != NULL);
-@@ -166,7 +166,8 @@ mDNSexport mStatus mDNSPlatformSendUDP(c
+@@ -166,7 +183,8 @@ mDNSexport mStatus mDNSPlatformSendUDP(c
          sin->sin_family         = AF_INET;
          sin->sin_port           = dstPort.NotAnInteger;
          sin->sin_addr.s_addr    = dst->ip.v4.NotAnInteger;
@@ -20,7 +456,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
      }
  
  #if HAVE_IPV6
-@@ -180,7 +181,8 @@ mDNSexport mStatus mDNSPlatformSendUDP(c
+@@ -180,7 +198,8 @@ mDNSexport mStatus mDNSPlatformSendUDP(c
          sin6->sin6_family         = AF_INET6;
          sin6->sin6_port           = dstPort.NotAnInteger;
          sin6->sin6_addr           = *(struct in6_addr*)&dst->ip.v6;
@@ -30,7 +466,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
      }
  #endif
  
-@@ -210,7 +212,7 @@ mDNSexport mStatus mDNSPlatformSendUDP(c
+@@ -210,7 +229,7 @@ mDNSexport mStatus mDNSPlatformSendUDP(c
  }
  
  // This routine is called when the main loop detects that data is available on a socket.
@@ -39,7 +475,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  {
      mDNSAddr senderAddr, destAddr;
      mDNSIPPort senderPort;
-@@ -306,89 +308,477 @@ mDNSlocal void SocketDataReady(mDNS *con
+@@ -306,89 +325,477 @@ mDNSlocal void SocketDataReady(mDNS *con
  
      if (packetLen >= 0)
          mDNSCoreReceive(m, &packet, (mDNSu8 *)&packet + packetLen,
@@ -469,61 +905,61 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  }
  
 -mDNSexport void           mDNSPlatformUDPClose(UDPSocket *sock)
-+mDNSexport UDPSocket *mDNSPlatformUDPSocket(mDNS * const m, mDNSIPPort port)
++mDNSexport UDPSocket *mDNSPlatformUDPSocket(mDNS * const m, mDNSIPPort requestedPort)
  {
 -    (void)sock;         // Unused
-+   mStatus err;
-+   mDNSIPPort port = port;
-+   mDNSBool randomizePort = mDNSIPPortIsZero(port);
-+   struct sockaddr sa;
-+   int i = 1000; // Try at most 1000 times to get a unique random port
-+   UDPSocket *p = mallocL("UDPSocket", sizeof(UDPSocket));
-+   if (!p) { LogMsg("mDNSPlatformUDPSocket: memory exhausted"); return(mDNSNULL); }
-+   mDNSPlatformMemZero(p, sizeof(UDPSocket));
-+   p->port  = zeroIPPort;
-+   p->sktv4 = -1;
-+   p->sktv6 = -1;
++    mStatus err;
++    mDNSIPPort port = requestedPort;
++    mDNSBool randomizePort = mDNSIPPortIsZero(requestedPort);
++    struct sockaddr sa;
++    int i = 1000; // Try at most 1000 times to get a unique random port
++    UDPSocket *p = mallocL("UDPSocket", sizeof(UDPSocket));
++    if (!p) { LogMsg("mDNSPlatformUDPSocket: memory exhausted"); return(mDNSNULL); }
++    mDNSPlatformMemZero(p, sizeof(UDPSocket));
++    p->port  = zeroIPPort;
++    p->sktv4 = -1;
++    p->sktv6 = -1;
 +
-+   (void)m;
++    (void)m;
 +
-+   do
++    do
 +    {
-+    // The kernel doesn't do cryptographically strong random port allocation, so we do it ourselves here
-+    if (randomizePort) port = mDNSOpaque16fromIntVal(0xC000 + mDNSRandom(0x3FFF));
-+      mDNSPlatformMemZero(&sa, sizeof(struct sockaddr));
-+      sa.sa_family = AF_INET;
-+    err = SetupSocket(&sa, port, 0, &p->sktv4, &p->port, mDNSSameIPPort(port, NATPMPAnnouncementPort));
-+    /* TODO: make me work!
-+    if (!err)
++        // The kernel doesn't do cryptographically strong random port allocation, so we do it ourselves here
++        if (randomizePort) port = mDNSOpaque16fromIntVal(0xC000 + mDNSRandom(0x3FFF));
++        mDNSPlatformMemZero(&sa, sizeof(struct sockaddr));
++        sa.sa_family = AF_INET;
++        err = SetupSocket(&sa, port, 0, &p->sktv4, &p->port, mDNSSameIPPort(requestedPort, NATPMPAnnouncementPort));
++        /* TODO: make me work!
++        if (!err)
 +        {
-+           mDNSPlatformMemZero(&sa, sizeof(struct sockaddr));
-+         sa.sa_family = AF_INET6;
-+        err = SetupSocket(&sa, port, 0, &p->sktv6, &p->port, 0);
-+        if (err) { close(p->sktv4); p->sktv4 = -1; }
++            mDNSPlatformMemZero(&sa, sizeof(struct sockaddr));
++            sa.sa_family = AF_INET6;
++            err = SetupSocket(&sa, port, 0, &p->sktv6, &p->port, 0);
++            if (err) { close(p->sktv4); p->sktv4 = -1; }
 +        }*/
-+    i--;
++        i--;
 +    } while (err == EADDRINUSE && randomizePort && i);
 +
-+   if (err)
++    if (err)
 +    {
-+    // In customer builds we don't want to log failures with port 5351, because this is a known issue
-+    // of failing to bind to this port when Internet Sharing has already bound to it
-+    // We also don't want to log about port 5350, due to a known bug when some other
-+    // process is bound to it.
-+    if (mDNSSameIPPort(port, NATPMPPort) || mDNSSameIPPort(port, NATPMPAnnouncementPort))
-+        LogInfo("mDNSPlatformUDPSocket: SetupSocket %d failed error %d errno %d (%s)", mDNSVal16(port), err, errno, strerror(errno));
-+    else LogMsg("mDNSPlatformUDPSocket: SetupSocket %d failed error %d errno %d (%s)", mDNSVal16(port), err, errno, strerror(errno));
-+    freeL("UDPSocket", p);
-+    return(mDNSNULL);
++        // In customer builds we don't want to log failures with port 5351, because this is a known issue
++        // of failing to bind to this port when Internet Sharing has already bound to it
++        // We also don't want to log about port 5350, due to a known bug when some other
++        // process is bound to it.
++        if (mDNSSameIPPort(requestedPort, NATPMPPort) || mDNSSameIPPort(requestedPort, NATPMPAnnouncementPort))
++            LogInfo("mDNSPlatformUDPSocket: SetupSocket %d failed error %d errno %d (%s)", mDNSVal16(requestedPort), err, errno, strerror(errno));
++        else LogMsg("mDNSPlatformUDPSocket: SetupSocket %d failed error %d errno %d (%s)", mDNSVal16(requestedPort), err, errno, strerror(errno));
++            freeL("UDPSocket", p);
++            return(mDNSNULL);
 +    }
-+   
-+   p->prev = NULL;
-+   p->next = PlatformUDPSockets;
-+   if (p->next)
-+      p->next->prev = p;
-+   PlatformUDPSockets = p;
-+   
-+   return(p);
++
++    p->prev = NULL;
++    p->next = PlatformUDPSockets;
++    if (p->next)
++        p->next->prev = p;
++    PlatformUDPSockets = p;
++
++    return(p);
 +}
 +
 +mDNSexport void mDNSPlatformUDPClose(UDPSocket *sock)
@@ -556,7 +992,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  }
  
  mDNSexport void mDNSPlatformSendRawPacket(const void *const msg, const mDNSu8 *const end, mDNSInterfaceID InterfaceID)
-@@ -396,6 +786,7 @@ mDNSexport void mDNSPlatformSendRawPacke
+@@ -396,6 +803,7 @@ mDNSexport void mDNSPlatformSendRawPacke
      (void)msg;          // Unused
      (void)end;          // Unused
      (void)InterfaceID;          // Unused
@@ -564,7 +1000,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  }
  
  mDNSexport void mDNSPlatformSetLocalAddressCacheEntry(mDNS *const m, const mDNSAddr *const tpa, const mDNSEthAddr *const tha, mDNSInterfaceID InterfaceID)
-@@ -404,15 +795,18 @@ mDNSexport void mDNSPlatformSetLocalAddr
+@@ -404,15 +812,18 @@ mDNSexport void mDNSPlatformSetLocalAddr
      (void)tpa;          // Unused
      (void)tha;          // Unused
      (void)InterfaceID;          // Unused
@@ -583,7 +1019,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  }
  
  mDNSexport void mDNSPlatformSetAllowSleep(mDNS *const m, mDNSBool allowSleep, const char *reason)
-@@ -420,6 +814,7 @@ mDNSexport void mDNSPlatformSetAllowSlee
+@@ -420,6 +831,7 @@ mDNSexport void mDNSPlatformSetAllowSlee
      (void) m;
      (void) allowSleep;
      (void) reason;
@@ -591,7 +1027,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  }
  
  #if COMPILER_LIKES_PRAGMA_MARK
-@@ -453,20 +848,108 @@ mDNSexport mDNSBool mDNSPlatformSetDNSCo
+@@ -453,20 +865,108 @@ mDNSexport mDNSBool mDNSPlatformSetDNSCo
      return mDNStrue;
  }
  
@@ -701,7 +1137,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  }
  
  #if COMPILER_LIKES_PRAGMA_MARK
-@@ -601,13 +1084,15 @@ mDNSlocal void ClearInterfaceList(mDNS *
+@@ -601,13 +1101,15 @@ mDNSlocal void ClearInterfaceList(mDNS *
  // Sets up a send/receive socket.
  // If mDNSIPPort port is non-zero, then it's a multicast socket on the specified interface
  // If mDNSIPPort port is zero, then it's a randomly assigned port number, used for sending unicast queries
@@ -719,7 +1155,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  
      (void) interfaceIndex;  // This parameter unused on plaforms that don't have IPv6
      assert(intfAddr != NULL);
-@@ -673,7 +1158,8 @@ mDNSlocal int SetupSocket(struct sockadd
+@@ -673,7 +1175,8 @@ mDNSlocal int SetupSocket(struct sockadd
          // Add multicast group membership on this interface
          if (err == 0 && JoinMulticastGroup)
          {
@@ -729,7 +1165,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
              imr.imr_interface        = ((struct sockaddr_in*)intfAddr)->sin_addr;
              err = setsockopt(*sktPtr, IPPROTO_IP, IP_ADD_MEMBERSHIP, &imr, sizeof(imr));
              if (err < 0) { err = errno; perror("setsockopt - IP_ADD_MEMBERSHIP"); }
-@@ -708,9 +1194,10 @@ mDNSlocal int SetupSocket(struct sockadd
+@@ -708,9 +1211,10 @@ mDNSlocal int SetupSocket(struct sockadd
          {
              bindAddr.sin_family      = AF_INET;
              bindAddr.sin_port        = port.NotAnInteger;
@@ -741,7 +1177,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
          }
      }     // endif (intfAddr->sa_family == AF_INET)
  
-@@ -875,10 +1362,10 @@ mDNSlocal int SetupOneInterface(mDNS *co
+@@ -875,10 +1379,10 @@ mDNSlocal int SetupOneInterface(mDNS *co
      if (err == 0)
      {
          if (alias->multicastSocket4 == -1 && intfAddr->sa_family == AF_INET)
@@ -754,7 +1190,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  #endif
      }
  
-@@ -1236,11 +1723,11 @@ mDNSexport mStatus mDNSPlatformInit(mDNS
+@@ -1236,11 +1740,11 @@ mDNSexport mStatus mDNSPlatformInit(mDNS
  
      sa.sa_family = AF_INET;
      m->p->unicastSocket4 = -1;
@@ -768,7 +1204,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  #endif
  
      // Tell mDNS core about the network interfaces on this machine.
-@@ -1590,6 +2077,24 @@ mDNSexport void mDNSPosixGetFDSet(mDNS *
+@@ -1590,6 +2094,24 @@ mDNSexport void mDNSPosixGetFDSet(mDNS *
          info = (PosixNetworkInterface *)(info->coreIntf.next);
      }
  
@@ -793,7 +1229,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
      // 3. Calculate the time remaining to the next scheduled event (in struct timeval format)
      ticks = nextevent - mDNS_TimeNow(m);
      if (ticks < 1) ticks = 1;
-@@ -1612,13 +2117,13 @@ mDNSexport void mDNSPosixProcessFDSet(mD
+@@ -1612,13 +2134,13 @@ mDNSexport void mDNSPosixProcessFDSet(mD
      if (m->p->unicastSocket4 != -1 && FD_ISSET(m->p->unicastSocket4, readfds))
      {
          FD_CLR(m->p->unicastSocket4, readfds);
@@ -809,7 +1245,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
      }
  #endif
  
-@@ -1627,17 +2132,49 @@ mDNSexport void mDNSPosixProcessFDSet(mD
+@@ -1627,17 +2149,49 @@ mDNSexport void mDNSPosixProcessFDSet(mD
          if (info->multicastSocket4 != -1 && FD_ISSET(info->multicastSocket4, readfds))
          {
              FD_CLR(info->multicastSocket4, readfds);
@@ -861,7 +1297,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
  }
  
  // update gMaxFD
-@@ -1778,3 +2315,70 @@ mStatus mDNSPosixRunEventLoopOnce(mDNS *
+@@ -1778,3 +2332,70 @@ mStatus mDNSPosixRunEventLoopOnce(mDNS *
  
      return mStatus_NoError;
  }
@@ -932,9 +1368,58 @@ diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.c mDNSResponder-522.92.1-L
 +    return -1;
 +}
 +#endif
+diff -rupN mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.h mDNSResponder-522.92.1-Linux/mDNSPosix/mDNSPosix.h
+--- mDNSResponder-522.92.1/mDNSPosix/mDNSPosix.h	2011-12-01 16:39:45.000000000 -0800
++++ mDNSResponder-522.92.1-Linux/mDNSPosix/mDNSPosix.h	2014-08-17 13:21:32.000000000 -0700
+@@ -56,6 +56,36 @@ struct mDNS_PlatformSupport_struct
+ #endif
+ };
+ 
++// Platform-specific low-level networking code
++
++struct UDPSocket_struct {
++  mDNSIPPort port;
++  int sktv4;
++  int sktv6;
++  
++  struct UDPSocket_struct* next;
++  struct UDPSocket_struct* prev;
++};
++
++struct TCPSocket_struct {
++   TCPSocketFlags flags; // MUST BE FIRST FIELD -- mDNSCore expects every TCPSocket_struct to begin with TCPSocketFlags flags
++   int sktv4;
++   int sktv6;
++   int activeSkt;
++   
++   mStatus                 err;
++   domainname              hostname;
++   TCPConnectionCallback   callback;
++   void*                   context;
++   
++   struct	{
++       unsigned connected:1;
++   } state;
++   
++   struct TCPSocket_struct* next;
++   struct TCPSocket_struct* prev;
++};
++
+ #define uDNS_SERVERS_FILE "/etc/resolv.conf"
+ extern int ParseDNSServers(mDNS *m, const char *filePath);
+ extern mStatus mDNSPlatformPosixRefreshInterfaceList(mDNS *const m);
+@@ -78,6 +108,8 @@ extern mStatus mDNSPosixListenForSignalI
+ extern mStatus mDNSPosixIgnoreSignalInEventLoop( int signum);
+ extern mStatus mDNSPosixRunEventLoopOnce( mDNS *m, const struct timeval *pTimeout, sigset_t *pSignalsReceived, mDNSBool *pDataDispatched);
+ 
++int mDNS_PlatformGetGateway(const char* ifname, mDNSAddr* v4, mDNSAddr* v6);
++
+ #ifdef  __cplusplus
+ }
+ #endif
 diff -rupN mDNSResponder-522.92.1/mDNSShared/PlatformCommon.c mDNSResponder-522.92.1-Linux/mDNSShared/PlatformCommon.c
 --- mDNSResponder-522.92.1/mDNSShared/PlatformCommon.c	2012-06-29 21:52:35.000000000 -0700
-+++ mDNSResponder-522.92.1-Linux/mDNSShared/PlatformCommon.c	2014-08-17 11:42:42.000000000 -0700
++++ mDNSResponder-522.92.1-Linux/mDNSShared/PlatformCommon.c	2014-08-17 13:21:32.000000000 -0700
 @@ -21,6 +21,7 @@
  #include <errno.h>              // Needed for errno etc.
  #include <sys/socket.h>         // Needed for socket() etc.
@@ -987,7 +1472,7 @@ diff -rupN mDNSResponder-522.92.1/mDNSShared/PlatformCommon.c mDNSResponder-522.
  
 diff -rupN mDNSResponder-522.92.1/mDNSShared/dnsextd.c mDNSResponder-522.92.1-Linux/mDNSShared/dnsextd.c
 --- mDNSResponder-522.92.1/mDNSShared/dnsextd.c	2013-04-25 16:22:21.000000000 -0700
-+++ mDNSResponder-522.92.1-Linux/mDNSShared/dnsextd.c	2014-08-17 11:46:25.000000000 -0700
++++ mDNSResponder-522.92.1-Linux/mDNSShared/dnsextd.c	2014-08-17 13:21:32.000000000 -0700
 @@ -1240,8 +1240,8 @@ SetupSockets
  
      // set up socket on which we receive private requests
@@ -999,3 +1484,41 @@ diff -rupN mDNSResponder-522.92.1/mDNSShared/dnsextd.c mDNSResponder-522.92.1-Li
      mDNSPlatformMemZero(&daddr, sizeof(daddr));
      daddr.sin_family        = AF_INET;
      daddr.sin_addr.s_addr   = zerov4Addr.NotAnInteger;
+diff -rupN mDNSResponder-522.92.1/mDNSShared/dnsextd_parser.y mDNSResponder-522.92.1-Linux/mDNSShared/dnsextd_parser.y
+--- mDNSResponder-522.92.1/mDNSShared/dnsextd_parser.y	2010-03-17 13:26:12.000000000 -0700
++++ mDNSResponder-522.92.1-Linux/mDNSShared/dnsextd_parser.y	2014-08-17 13:21:32.000000000 -0700
+@@ -74,6 +74,7 @@ typedef struct ZoneSpec
+ 	struct ZoneSpec	*	next;
+ } ZoneSpec;
+ 
++int yydebug=0; // gck
+ 
+ static StringListElem	*	g_stringList = NULL;
+ static KeySpec			*	g_keys;
+@@ -150,7 +151,7 @@ command:
+ options_set:
+ 		OPTIONS optionscontent
+ 		{
+-			// SetupOptions( &g_optionsInfo, context );
++			//SetupOptions( &g_optionsInfo, context );
+ 		}
+ 		;
+ 
+@@ -281,7 +282,7 @@ zonestatement:
+ 		}
+ 		|
+ 		ALLOWUPDATE keycontent
+-		{
++		{		
+ 			g_zoneSpec.allowUpdate = g_stringList;
+ 			g_stringList = NULL;
+ 		}
+@@ -325,7 +326,7 @@ keystatements:
+ 		;
+ 
+ keystatement:
+-		KEY DOMAINNAME
++		KEY QUOTEDSTRING
+ 		{
+ 			StringListElem * elem;
+ 
