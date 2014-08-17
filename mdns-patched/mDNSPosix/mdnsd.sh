@@ -22,15 +22,6 @@
 # PROVIDE: mdnsd
 # REQUIRE: NETWORKING
 
-### BEGIN INIT INFO
-# Provides:        mdns
-# Required-Start:  $network $time $syslog
-# Required-Stop:   $network $time $syslog
-# Default-Start:   2 3 4 5
-# Default-Stop:    1
-# Short-Description: Apple mDNSResponder daemon
-### END INIT INFO
-
 if [ -r /usr/sbin/mdnsd ]; then
     DAEMON=/usr/sbin/mdnsd
 else

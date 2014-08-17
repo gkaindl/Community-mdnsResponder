@@ -17,5 +17,9 @@
   </dict>
   <key>EnableTransactions</key>
   <true/>
+  <key>BeginTransactionAtShutdown</key>
+  <true/>
+  <key>POSIXSpawnType</key>
+  <string>Interactive</string>
 </dict>
 </plist>
