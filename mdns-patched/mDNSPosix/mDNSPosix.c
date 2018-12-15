@@ -428,6 +428,7 @@ mDNSlocal void DoTcpSocketCallback(TCPSocket *sock)
 {
 	mDNSBool c = !sock->state.connected;
 	sock->state.connected = 1;
+   sock->state.connecting = 0;
 	sock->callback(sock, sock->context, c, sock->err);
 	// Note: the callback may call CloseConnection here, which frees the context structure!
 }
@@ -473,7 +474,7 @@ mDNSexport TCPSocket *mDNSPlatformTCPSocket(mDNS * const m, TCPSocketFlags flags
       p->next->prev = p;
    PlatformTCPSockets = p;
    
-   LogMsg("TCPSocket created for port %d, sock %d", port->NotAnInteger, p->sktv4);
+   //LogMsg("TCPSocket created for port %d, sock %d", port->NotAnInteger, p->sktv4);
    
    return p;
 }
@@ -602,7 +603,8 @@ mDNSexport mStatus mDNSPlatformTCPConnect(TCPSocket *sock, const mDNSAddr *dst, 
 	}
 
    sock->activeSkt = *s;
-
+   sock->state.connecting = 1;
+   
    if (connect(*s, (struct sockaddr*)&ss, sizeof(struct sockaddr)) < 0) {
       switch (errno) {
          case EINPROGRESS:
@@ -612,8 +614,11 @@ mDNSexport mStatus mDNSPlatformTCPConnect(TCPSocket *sock, const mDNSAddr *dst, 
             return mStatus_ConnFailed;
       }
    }
-   
+      
    LogMsg("NOTE: mDNSPlatformTCPConnect completed synchronously");
+   
+   DoTcpSocketCallback(sock);
+   
    return mStatus_NoError;
 }
 
@@ -634,7 +639,7 @@ mDNSexport void mDNSPlatformTCPCloseConnection(TCPSocket *sock)
       if (sock->next)
          sock->next->prev = sock->prev;
 
-      LogMsg("Closed TCP socket %d", sock->sktv4);
+      //LogMsg("Closed TCP socket %d", sock->sktv4);
 
       freeL("TCPSocket/mDNSPlatformTCPCloseConnection", sock);
    }
@@ -1905,13 +1910,15 @@ mDNSlocal void mDNSPosixAddToFDSet(int *nfds, fd_set *readfds, int s)
 	FD_SET(s, readfds);
 	}
 
-mDNSexport void mDNSPosixGetFDSet(mDNS *m, int *nfds, fd_set *readfds, struct timeval *timeout)
+mDNSexport void mDNSPosixGetFDSet(mDNS *m, int *nfds, fd_set *readfds, fd_set *writefds, struct timeval *timeout)
 	{
 	mDNSs32 ticks;
 	struct timeval interval;
 
 	// 1. Call mDNS_Execute() to let mDNSCore do what it needs to do
 	mDNSs32 nextevent = mDNS_Execute(m);
+   
+   FD_ZERO(writefds);
 
 	// 2. Build our list of active file descriptors
 	PosixNetworkInterface *info = (PosixNetworkInterface *)(m->HostInterfaces);
@@ -1941,7 +1948,13 @@ mDNSexport void mDNSPosixGetFDSet(mDNS *m, int *nfds, fd_set *readfds, struct ti
    TCPSocket* tcpSock = PlatformTCPSockets;
    while (tcpSock) {
       int fd = mDNSPlatformTCPGetFD(tcpSock);
-      if (fd > -1) mDNSPosixAddToFDSet(nfds, readfds, fd);
+      if (fd > -1) {
+         if (!tcpSock->state.connecting) {
+            mDNSPosixAddToFDSet(nfds, readfds, fd);
+         } else {
+            mDNSPosixAddToFDSet(nfds, writefds, fd);
+         }
+      }
 
       tcpSock = tcpSock->next;
    }
@@ -1958,7 +1971,7 @@ mDNSexport void mDNSPosixGetFDSet(mDNS *m, int *nfds, fd_set *readfds, struct ti
 		*timeout = interval;
 	}
 
-mDNSexport void mDNSPosixProcessFDSet(mDNS *const m, fd_set *readfds)
+mDNSexport void mDNSPosixProcessFDSet(mDNS *const m, fd_set *readfds, fd_set *writefds)
 	{
 	PosixNetworkInterface *info;
 	assert(m       != NULL);
@@ -2014,8 +2027,11 @@ mDNSexport void mDNSPosixProcessFDSet(mDNS *const m, fd_set *readfds)
 		TCPSocket* tcpSock = PlatformTCPSockets;
       while (tcpSock) {
          int fd = mDNSPlatformTCPGetFD(tcpSock);
-         if (fd > -1 && FD_ISSET(fd, readfds)) {
-            FD_CLR(fd, readfds);
+                  
+         if (fd > -1 && (FD_ISSET(fd, readfds) || FD_ISSET(fd, writefds))) {
+            if (FD_ISSET(fd, readfds)) {
+               FD_CLR(fd, readfds);
+            }
             
             if (tcpSock->flags & kTCPSocketFlags_UseTLS) {
                LogMsg("ERROR: mDNSPosixProcessFDSet kTCPSocketFlags_UseTLS not supported!");
@@ -2130,22 +2146,23 @@ mStatus mDNSPosixRunEventLoopOnce(mDNS *m, const struct timeval *pTimeout,
 									sigset_t *pSignalsReceived, mDNSBool *pDataDispatched)
 	{
 	fd_set			listenFDs = gEventFDs;
+   fd_set         writeFDs;
 	int				fdMax = 0, numReady;
 	struct timeval	timeout = *pTimeout;
 	
 	// Include the sockets that are listening to the wire in our select() set
-	mDNSPosixGetFDSet(m, &fdMax, &listenFDs, &timeout);	// timeout may get modified
+	mDNSPosixGetFDSet(m, &fdMax, &listenFDs, &writeFDs, &timeout);	// timeout may get modified
 	if (fdMax < gMaxFD)
 		fdMax = gMaxFD;
 
-	numReady = select(fdMax + 1, &listenFDs, (fd_set*) NULL, (fd_set*) NULL, &timeout);
+	numReady = select(fdMax + 1, &listenFDs, &writeFDs, (fd_set*) NULL, &timeout);
 
 	// If any data appeared, invoke its callback
 	if (numReady > 0)
 		{
 		PosixEventSource	*iSource;
 
-		(void) mDNSPosixProcessFDSet(m, &listenFDs);	// call this first to process wire data for clients
+		(void) mDNSPosixProcessFDSet(m, &listenFDs, &writeFDs);	// call this first to process wire data for clients
 
 		for (iSource=(PosixEventSource*)gEventSources.Head; iSource; iSource = iSource->Next)
 			{

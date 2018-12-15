@@ -187,11 +187,11 @@ mDNSlocal void WaitForAnswer(mDNS *const m, int seconds)
 	while (!StopNow)
 		{
 		int nfds = 0;
-		fd_set readfds;
+		fd_set readfds, writefds;
 		struct timeval now, remain = end;
 		int result;
 
-		FD_ZERO(&readfds);
+		FD_ZERO(&readfds); FD_ZERO(&writefds);
 		gettimeofday(&now, NULL);
 		if (remain.tv_usec < now.tv_usec) { remain.tv_usec += 1000000; remain.tv_sec--; }
 		if (remain.tv_sec < now.tv_sec)
@@ -201,9 +201,9 @@ mDNSlocal void WaitForAnswer(mDNS *const m, int seconds)
 			}
 		remain.tv_usec -= now.tv_usec;
 		remain.tv_sec  -= now.tv_sec;
-		mDNSPosixGetFDSet(m, &nfds, &readfds, &remain);
+		mDNSPosixGetFDSet(m, &nfds, &readfds, &writefds, &remain);
 		result = select(nfds, &readfds, NULL, NULL, &remain);
-		if (result >= 0) mDNSPosixProcessFDSet(m, &readfds);
+		if (result >= 0) mDNSPosixProcessFDSet(m, &readfds, &writefds);
 		else if (errno != EINTR) StopNow = 2;
 		}
 	}

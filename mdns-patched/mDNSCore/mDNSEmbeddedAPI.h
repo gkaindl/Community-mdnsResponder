@@ -1945,6 +1945,8 @@ struct mDNS_struct
 	ClientTunnel     *TunnelClients;
 	uuid_t           asl_uuid;					// uuid for ASL logging
 	void		    *WCF;
+#else
+   int               asl_uuid;
 #endif
 
 	// Fixed storage, to avoid creating large objects on the stack

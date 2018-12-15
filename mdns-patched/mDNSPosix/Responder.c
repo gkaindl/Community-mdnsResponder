@@ -673,7 +673,7 @@ int main(int argc, char **argv)
 	while (!gStopNow)
 		{
 		int nfds = 0;
-		fd_set readfds;
+		fd_set readfds, writefds;
 		struct timeval timeout;
 		int result;
 		
@@ -689,11 +689,11 @@ int main(int argc, char **argv)
 		timeout.tv_usec = 0;
 		
 		// 3. Give the mDNSPosix layer a chance to add its information to the fd_set and timeout
-		mDNSPosixGetFDSet(&mDNSStorage, &nfds, &readfds, &timeout);
+		mDNSPosixGetFDSet(&mDNSStorage, &nfds, &readfds, &writefds, &timeout);
 		
 		// 4. Call select as normal
 		verbosedebugf("select(%d, %d.%06d)", nfds, timeout.tv_sec, timeout.tv_usec);
-		result = select(nfds, &readfds, NULL, NULL, &timeout);
+		result = select(nfds, &readfds, &writefds, NULL, &timeout);
 		
 		if (result < 0)
 			{
@@ -726,7 +726,7 @@ int main(int argc, char **argv)
 		else
 			{
 			// 5. Call mDNSPosixProcessFDSet to let the mDNSPosix layer do its work
-			mDNSPosixProcessFDSet(&mDNSStorage, &readfds);
+			mDNSPosixProcessFDSet(&mDNSStorage, &readfds, &writefds);
 			
 			// 6. This example client has no other work it needs to be doing,
 			// but a real client would do its work here

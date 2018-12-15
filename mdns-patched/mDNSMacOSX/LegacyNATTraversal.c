@@ -32,7 +32,7 @@ inet_pton( int family, const char * addr, void * dst )
 	{
 	struct sockaddr_storage ss;
 	int sslen = sizeof( ss );
-
+   
 	ZeroMemory( &ss, sizeof( ss ) );
 	ss.ss_family = (ADDRESS_FAMILY)family;
 
@@ -200,7 +200,7 @@ mDNSlocal void handleLNTDeviceDescriptionResponse(tcpLNTInfo *tcpInfo)
 	mDNSs16 http_result;
 	
 	if (!mDNSIPPortIsZero(m->UPnPSOAPPort)) return; // already have the info we need
-
+   
 	http_result = ParseHTTPResponseCode(&ptr, end); // Note: modifies ptr
 	if (http_result == HTTPCode_404) LNT_ClearState(m);
 	if (http_result != HTTPCode_200) 
@@ -240,11 +240,16 @@ mDNSlocal void handleLNTDeviceDescriptionResponse(tcpLNTInfo *tcpInfo)
 		ptr++;
 		}
 	if (ptr == mDNSNULL || ptr == end) { LogInfo("handleLNTDeviceDescriptionResponse: didn't find controlURL string"); return; }
+      
 	ptr += 11;							// skip over "controlURL>"
 	if (ptr >= end) { LogInfo("handleLNTDeviceDescriptionResponse: past end of buffer and no body!"); return; } // check ptr again in case we skipped over the end of the buffer
 
 	// find the end of the controlURL element
 	for (stop = ptr; stop < end; stop++) { if (*stop == '<') { end = stop; break; } }
+   
+   //   gck: make sure we actually find the '<', since if the reply is not fully loaded, we might end up with the
+   //        end of the buffer somewhere in the middle of the control url
+   if (*stop != '<') return;
 
 	// fill in default port
 	m->UPnPSOAPPort = m->UPnPRouterPort;
@@ -260,7 +265,7 @@ mDNSlocal void handleLNTDeviceDescriptionResponse(tcpLNTInfo *tcpInfo)
 		mDNSPlatformMemFree(m->UPnPSOAPURL);
 		m->UPnPSOAPURL = mDNSNULL; 
 		}
-	
+	   
 	if (ParseHttpUrl(ptr, end, &m->UPnPSOAPAddressString, &m->UPnPSOAPPort, &m->UPnPSOAPURL) != mStatus_NoError) return;
 	// the SOAPURL should look something like "/uuid:0013-108c-4b3f0000f3dc"
 
@@ -522,7 +527,7 @@ mDNSlocal mStatus MakeTCPConnection(mDNS *const m, tcpLNTInfo *info, const mDNSA
 		info->sock = mDNSNULL;
 		mDNSPlatformMemFree(info->Reply);
 		info->Reply = mDNSNULL;
-		}
+		}      
 	return(err);
 	}
 
@@ -746,16 +751,16 @@ mDNSlocal mStatus GetDeviceDescription(mDNS *m, tcpLNTInfo *info)
 		"Host: %s\r\n"
 		"Connection: close\r\n"
 		"\r\n";
-
+   
 	if (!mDNSIPPortIsZero(m->UPnPSOAPPort)) return mStatus_NoError; // already have the info we need
-	
+   
 	if (m->UPnPRouterURL == mDNSNULL || m->UPnPRouterAddressString == mDNSNULL) { LogInfo("GetDeviceDescription: no router URL or address string!"); return (mStatus_Invalid); }
 
 	// build message
 	if      (info->Request != mDNSNULL) mDNSPlatformMemZero(info->Request, LNT_MAXBUFSIZE); // reuse previously allocated buffer
 	else if ((info->Request = mDNSPlatformMemAllocate(LNT_MAXBUFSIZE)) == mDNSNULL) { LogInfo("can't allocate send buffer for discovery"); return (mStatus_NoMemoryErr); }
 	info->requestLen = mDNS_snprintf((char*)info->Request, LNT_MAXBUFSIZE, szSSDPMsgDescribeDeviceFMT, m->UPnPRouterURL, m->UPnPRouterAddressString);
-	LogInfo("Describe Device: [%s]", info->Request);
+	   
 	return MakeTCPConnection(m, info, &m->Router, m->UPnPRouterPort, LNTDiscoveryOp);
 	}
 
@@ -854,6 +859,7 @@ mDNSexport void LNT_ConfigureRouterInfo(mDNS *m, const mDNSInterfaceID Interface
 	if (m->SSDPSocket) { debugf("LNT_ConfigureRouterInfo destroying SSDPSocket %p", &m->SSDPSocket); mDNSPlatformUDPClose(m->SSDPSocket); m->SSDPSocket = mDNSNULL; }
 
 	mDNSASLLog((uuid_t *)&m->asl_uuid, "natt.legacy.ssdp", "success", "success", "");
+      
 	// now send message to get the device description
 	GetDeviceDescription(m, &m->tcpDeviceInfo);
 	}

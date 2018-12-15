@@ -80,6 +80,7 @@ struct TCPSocket_struct {
    
    struct	{
        unsigned connected:1;
+       unsigned connecting:1;
    } state;
    
    struct TCPSocket_struct* next;
@@ -97,8 +98,8 @@ extern mStatus mDNSPlatformPosixRefreshInterfaceList(mDNS *const m);
 // Set timeout->tv_sec to 0x3FFFFFFF if you want to have effectively no timeout
 // After calling mDNSPosixGetFDSet(), call select(nfds, &readfds, NULL, NULL, &timeout); as usual
 // After select() returns, call mDNSPosixProcessFDSet() to let mDNSCore do its work
-extern void mDNSPosixGetFDSet(mDNS *m, int *nfds, fd_set *readfds, struct timeval *timeout);
-extern void mDNSPosixProcessFDSet(mDNS *const m, fd_set *readfds);
+extern void mDNSPosixGetFDSet(mDNS *m, int *nfds, fd_set *readfds, fd_set *writefds, struct timeval *timeout);
+extern void mDNSPosixProcessFDSet(mDNS *const m, fd_set *readfds, fd_set *writefds);
 
 typedef	void (*mDNSPosixEventCallback)(int fd, short filter, void *context);
 

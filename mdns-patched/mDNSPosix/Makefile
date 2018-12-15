@@ -52,6 +52,7 @@ LIBVERS = 1
 
 COREDIR = ../mDNSCore
 SHAREDDIR ?= ../mDNSShared
+OSXDIR ?= ../mDNSMacOSX
 JDK = /usr/jdk
 
 CC = @cc
@@ -61,7 +62,7 @@ LD = ld -shared
 CP = cp
 RM = rm
 LN = ln -s -f
-CFLAGS_COMMON = -I$(COREDIR) -I$(SHAREDDIR) -I$(OBJDIR) -fwrapv -W -Wall -DPID_FILE=\"/var/run/mdnsd.pid\" -DMDNS_UDS_SERVERPATH=\"/var/run/mdnsd\"
+CFLAGS_COMMON = -I$(COREDIR) -I$(OSXDIR) -I$(SHAREDDIR) -I$(OBJDIR) -fwrapv -W -Wall -DPID_FILE=\"/var/run/mdnsd.pid\" -Duuid_t=int -D_LEGACY_NAT_TRAVERSAL_ -D'mDNSASLLog(a,b,c,d,e,...)' -DMDNS_UDS_SERVERPATH=\"/var/run/mdnsd\"
 CFLAGS_PTHREAD =
 LINKOPTS =
 LINKOPTS_PTHREAD = -lpthread
@@ -229,7 +230,8 @@ clean:
 # daemon target builds the daemon
 DAEMONOBJS = $(OBJDIR)/PosixDaemon.c.o $(OBJDIR)/mDNSPosix.c.o $(OBJDIR)/mDNSUNP.c.o $(OBJDIR)/mDNS.c.o \
              $(OBJDIR)/DNSDigest.c.o $(OBJDIR)/uDNS.c.o $(OBJDIR)/DNSCommon.c.o $(OBJDIR)/uds_daemon.c.o \
-             $(OBJDIR)/mDNSDebug.c.o $(OBJDIR)/dnssd_ipc.c.o $(OBJDIR)/GenLinkedList.c.o $(OBJDIR)/PlatformCommon.c.o 
+             $(OBJDIR)/mDNSDebug.c.o $(OBJDIR)/dnssd_ipc.c.o $(OBJDIR)/GenLinkedList.c.o $(OBJDIR)/PlatformCommon.c.o \
+				 $(OBJDIR)/LegacyNATTraversal.c.o
 
 # dnsextd target build dnsextd
 DNSEXTDOBJ = $(OBJDIR)/mDNSPosix.c.o $(OBJDIR)/mDNSUNP.c.o $(OBJDIR)/mDNSDebug.c.o $(OBJDIR)/GenLinkedList.c.o $(OBJDIR)/DNSDigest.c.o \
@@ -438,7 +440,8 @@ JavaDoc: Java setup
 
 # The following targets build embedded example programs
 SPECIALOBJ = $(OBJDIR)/mDNSPosix.c.o $(OBJDIR)/mDNSUNP.c.o $(OBJDIR)/mDNSDebug.c.o $(OBJDIR)/GenLinkedList.c.o \
-	$(OBJDIR)/DNSDigest.c.o $(OBJDIR)/uDNS.c.o $(OBJDIR)/DNSCommon.c.o $(OBJDIR)/PlatformCommon.c.o
+	$(OBJDIR)/DNSDigest.c.o $(OBJDIR)/uDNS.c.o $(OBJDIR)/DNSCommon.c.o $(OBJDIR)/PlatformCommon.c.o \
+	$(OBJDIR)/LegacyNATTraversal.c.o
 COMMONOBJ  = $(SPECIALOBJ) $(OBJDIR)/mDNS.c.o
 APPOBJ     = $(COMMONOBJ) $(OBJDIR)/ExampleClientApp.c.o
 
@@ -492,6 +495,9 @@ $(OBJDIR)/%.c.o:	$(COREDIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/%.c.o:	$(SHAREDDIR)/%.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(OBJDIR)/%.c.o:	$(OSXDIR)/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OBJDIR)/%.c.threadsafe.o:	%.c
